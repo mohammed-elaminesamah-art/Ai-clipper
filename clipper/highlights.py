@@ -53,7 +53,6 @@ FILLER_WORDS = {
     "actually", "basically", "honestly", "literally",
 }
 
-
 @dataclass
 class Clip:
     """A candidate clip."""
@@ -65,7 +64,6 @@ class Clip:
     lines: List[str] = None
     starts: List[float] = None
     
-    # AI scores (added after reranking)
     ai_score: float = 0.0
     hook_score: float = 0.0
     curiosity_score: float = 0.0
@@ -78,7 +76,6 @@ class Clip:
 
 def _split_sentences(text: str) -> List[str]:
     """Split text into sentences."""
-    # Simple sentence splitting
     sentences = re.split(r'(?<=[.!?])\s+', text)
     return [s.strip() for s in sentences if s.strip()]
 
@@ -117,12 +114,10 @@ def _filler_penalty(text: str) -> float:
 def _sentence_boundary_score(text: str, at_end: bool = False) -> float:
     """Score based on sentence boundaries."""
     if at_end:
-        # Reward ending with punctuation
         if text.rstrip().endswith(('.', '!', '?')):
             return 0.3
         return -0.2
     else:
-        # Reward starting with a capital letter (not filler)
         if text and text[0].isupper():
             return 0.1
         return -0.1
@@ -182,7 +177,6 @@ def score_span(
     if text.rstrip().endswith(('.', '!', '?')):
         score += 5.0
     
-    # Clamp and return
     return max(0.0, min(100.0, score))
 
 
@@ -198,39 +192,55 @@ def find_clips(
     Find the best clip candidates from a transcript.
     Returns clips sorted by score (descending).
     """
+    # --- defensive check: ensure segments is a list of dicts ---
     segments = transcript.get("segments", [])
-    if not segments:
+    if not isinstance(segments, list):
+        eprint("[find_clips] segments is not a list, returning empty")
+        return []
+    
+    # Validate each segment
+    valid_segments = []
+    for seg in segments:
+        if not isinstance(seg, dict):
+            continue
+        if "start" not in seg or "end" not in seg:
+            continue
+        valid_segments.append(seg)
+    
+    if not valid_segments:
+        eprint("[find_clips] no valid segments found")
         return []
     
     # Build word list with timestamps
     words = []
-    for seg in segments:
-        for w in seg.get("words", []):
-            words.append({
-                "start": w["start"],
-                "end": w["end"],
-                "word": w["word"],
-            })
-    
-    if not words:
-        # Fallback: use segment-level
-        for seg in segments:
+    for seg in valid_segments:
+        seg_words = seg.get("words", [])
+        if seg_words and isinstance(seg_words, list):
+            for w in seg_words:
+                if isinstance(w, dict) and "start" in w and "end" in w:
+                    words.append({
+                        "start": w["start"],
+                        "end": w["end"],
+                        "word": w.get("word", ""),
+                    })
+        else:
+            # fallback: use segment-level text
             words.append({
                 "start": seg["start"],
                 "end": seg["end"],
-                "word": seg["text"],
+                "word": seg.get("text", ""),
             })
+    
+    if not words:
+        eprint("[find_clips] no words found")
+        return []
     
     # Generate candidate windows
     candidates = []
-    step = max(2.0, min_dur * 0.2)  # Slide by 20% of min duration
-    
-    # Build full text for context
-    full_text = " ".join(w["word"] for w in words)
+    step = max(2.0, min_dur * 0.2)
     
     # Slide window over words
     for i in range(0, len(words), max(1, int(step / 0.5))):
-        # Find window that covers target duration
         start_time = words[i]["start"]
         end_time = start_time + target
         
@@ -246,16 +256,18 @@ def find_clips(
             continue
         
         window_text = " ".join(window_words)
-        actual_duration = window_words[-1]["end"] - window_words[0]["start"] if window_words else target
+        actual_duration = words[-1]["end"] - words[0]["start"] if words else target
+        # More accurate: use the last word's end
+        if window_words:
+            actual_duration = words[min(i + len(window_words) - 1, len(words)-1)]["end"] - start_time
         
         # Check duration bounds
         if actual_duration < min_dur * 0.7 or actual_duration > max_dur * 1.3:
             continue
         
-        # Score
         score = score_span(window_text, start_time, start_time + actual_duration, actual_duration, target)
         
-        if score > 20:  # Threshold
+        if score > 20:
             candidates.append({
                 "start": start_time,
                 "end": start_time + actual_duration,
@@ -265,10 +277,13 @@ def find_clips(
                 "starts": [start_time],
             })
     
+    if not candidates:
+        return []
+    
     # Sort by score
     candidates.sort(key=lambda x: x["score"], reverse=True)
     
-    # Deduplicate overlapping candidates (simple version)
+    # Deduplicate overlapping candidates
     unique = []
     for c in candidates:
         overlap = False
@@ -282,7 +297,6 @@ def find_clips(
             if len(unique) >= count * 2:
                 break
     
-    # Convert to Clip objects
     clips = []
     for idx, c in enumerate(unique[:count * 2]):
         clips.append(Clip(
