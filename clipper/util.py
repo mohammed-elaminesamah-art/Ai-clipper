@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass
 
+FFMPEG = "ffmpeg"
 
 class ClipperError(Exception):
     """Base exception for clipper errors."""
